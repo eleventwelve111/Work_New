@@ -444,22 +444,208 @@ def create_2d_dose_heatmap(results, energy, channel_diameter, conversion_type='f
     return fig
 
 
-if __name__ == "__main__":
-    # Load results
-    results_file = os.path.join(DATA_DIR, 'simulation_results.json')
-    with open(results_file, 'r') as f:
-        results = json.load(f)
+# Enhanced outside wall heatmap with better visualization
+def create_radiation_outside_wall_heatmap(results, title=None):
+    """
+    Create an enhanced close-up Cartesian heatmap showing radiation distribution outside the wall
+    with optimized visualization for this specific shielding problem
+    """
+    # Extract mesh data
+    mesh_result = np.array(results['mesh_result'])
+    
+    # Create figure with higher resolution
+    fig, ax = plt.subplots(figsize=(14, 11), dpi=150)
+    
+    # Define the extent of the plot focused specifically on the area outside the wall
+    x_min = source_to_wall_distance + wall_thickness - 5  # Slightly before wall exit
+    x_max = source_to_wall_distance + wall_thickness + 150  # 150 cm outside wall
+    y_min = -75
+    y_max = 75
+    
+    # Calculate indices in the mesh corresponding to these limits
+    mesh_x_coords = np.linspace(-10, source_to_wall_distance + wall_thickness + 200, mesh_result.shape[0])
+    mesh_y_coords = np.linspace(-50, 50, mesh_result.shape[1])
+    
+    x_indices = np.logical_and(mesh_x_coords >= x_min, mesh_x_coords <= x_max)
+    y_indices = np.logical_and(mesh_y_coords >= y_min, mesh_y_coords <= y_max)
+    
+    # Extract the section of the mesh for the region of interest
+    x_subset = mesh_x_coords[x_indices]
+    y_subset = mesh_y_coords[y_indices]
+    outside_wall_data = mesh_result[np.ix_(x_indices, y_indices)]
+    
+    # Create coordinate meshes for the plot
+    X, Y = np.meshgrid(x_subset, y_subset)
+    
+    # Apply adaptive smoothing for better visualization
+    from scipy.ndimage import gaussian_filter
+    sigma = max(1, min(3, 5 / (results['channel_diameter'] + 0.1)))  # Smaller channels need more smoothing
+    smoothed_data = gaussian_filter(outside_wall_data.T, sigma=sigma)
+    
+    # Set zero or very small values to NaN to make them transparent
+    min_nonzero = np.max([np.min(smoothed_data[smoothed_data > 0]) / 10, 1e-12])
+    smoothed_data[smoothed_data < min_nonzero] = np.nan
+    
+    # Create an enhanced custom colormap specifically for radiation visualization
+    from matplotlib.colors import LinearSegmentedColormap
+    colors = [
+        (0.0, 0.0, 0.3),    # Dark blue (background/low values)
+        (0.0, 0.2, 0.6),    # Blue 
+        (0.0, 0.5, 0.8),    # Light blue
+        (0.0, 0.8, 0.8),    # Cyan
+        (0.0, 0.9, 0.3),    # Blue-green
+        (0.5, 1.0, 0.0),    # Green
+        (0.8, 1.0, 0.0),    # Yellow-green
+        (1.0, 1.0, 0.0),    # Yellow
+        (1.0, 0.8, 0.0),    # Yellow-orange
+        (1.0, 0.6, 0.0),    # Orange
+        (1.0, 0.0, 0.0)     # Red (highest intensity)
+    ]
+    
+    cmap_name = 'EnhancedRadiation'
+    custom_cmap = LinearSegmentedColormap.from_list(cmap_name, colors, N=256)
+    
+    # Use contourf for smoother visualization with more levels
+    levels = np.logspace(np.log10(min_nonzero), np.log10(np.nanmax(smoothed_data)), 20)
+    contour = ax.contourf(X, Y, smoothed_data, 
+                       levels=levels,
+                       norm=LogNorm(),
+                       cmap=custom_cmap,
+                       alpha=0.95,
+                       extend='both')
+    
+    # Add contour lines for a better indication of dose levels
+    contour_lines = ax.contour(X, Y, smoothed_data,
+                             levels=levels[::4],  # Fewer contour lines
+                             colors='black',
+                             alpha=0.3,
+                             linewidths=0.5)
+    
+    # Add colorbar with scientific notation
+    cbar = fig.colorbar(contour, ax=ax, format='%.1e', pad=0.01)
+    cbar.set_label('Radiation Flux (particles/cm²/s)', fontsize=12, fontweight='bold')
+    cbar.ax.tick_params(labelsize=10)
+    
+    # Add wall back position with improved styling
+    wall_exit_x = source_to_wall_distance + wall_thickness
+    ax.axvline(x=wall_exit_x, color='black', linestyle='-', linewidth=2.5, label='Wall Back')
+    
+    # Draw a small section of the wall for context
+    wall_section = plt.Rectangle((x_min, y_min), wall_exit_x - x_min, y_max - y_min,
+                               color='gray', alpha=0.5, edgecolor='black')
+    ax.add_patch(wall_section)
+    
+    # Add detector position with improved styling
+    detector_x = results['detector_x']
+    detector_y = results['detector_y']
+    
+    # Only show detector if it's in the displayed area
+    if x_min <= detector_x <= x_max and y_min <= detector_y <= y_max:
+        detector_circle = plt.Circle((detector_x, detector_y), detector_diameter/2, 
+                                  fill=False, color='red', linewidth=2, label='Detector')
+        ax.add_patch(detector_circle)
+        
+        # Add beam path from channel to detector with an arrow
+        arrow_props = dict(arrowstyle='->', linewidth=2, color='yellow', alpha=0.9)
+        beam_arrow = ax.annotate('', xy=(detector_x, detector_y), xytext=(wall_exit_x, 0),
+                              arrowprops=arrow_props)
+    
+    # Add channel exit with improved styling
+    channel_radius = results['channel_diameter'] / 2
+    channel_exit = plt.Circle((wall_exit_x, 0), channel_radius, 
+                            color='white', alpha=1.0, edgecolor='black', linewidth=1.5,
+                            label='Channel Exit')
+    ax.add_patch(channel_exit)
+    
+    # Add concentric circles to show distance from channel exit
+    for radius in [25, 50, 75, 100]:
+        # Draw dashed circle
+        distance_circle = plt.Circle((wall_exit_x, 0), radius, 
+                                  fill=False, color='white', linestyle='--', linewidth=1, alpha=0.6)
+        ax.add_patch(distance_circle)
+        
+        # Add distance label along 45° angle
+        angle = 45
+        label_x = wall_exit_x + radius * np.cos(np.radians(angle))
+        label_y = radius * np.sin(np.radians(angle))
+        ax.text(label_x, label_y, f"{radius} cm", color='white', fontsize=9,
+               ha='center', va='center', rotation=angle,
+               bbox=dict(facecolor='black', alpha=0.5, boxstyle='round,pad=0.2'))
+    
+    # Add detector angle indication if not at 0°
+    angle = results['detector_angle']
+    if angle > 0:
+        # Draw angle arc
+        angle_radius = 30
+        arc = plt.matplotlib.patches.Arc((wall_exit_x, 0), 
+                                       angle_radius*2, angle_radius*2, 
+                                       theta1=0, theta2=angle, 
+                                       color='white', linewidth=2)
+        ax.add_patch(arc)
+        
+        # Add angle text at arc midpoint
+        angle_text_x = wall_exit_x + angle_radius * 0.7 * np.cos(np.radians(angle/2))
+        angle_text_y = angle_radius * 0.7 * np.sin(np.radians(angle/2))
+        ax.text(angle_text_x, angle_text_y, f"{angle}°", color='white', 
+               ha='center', va='center', fontsize=12, fontweight='bold',
+               bbox=dict(facecolor='black', alpha=0.7, boxstyle='round,pad=0.3'))
+    
+    # Set labels and title with improved styling
+    ax.set_xlabel('Distance (cm)', fontsize=14, fontweight='bold')
+    ax.set_ylabel('Lateral Distance (cm)', fontsize=14, fontweight='bold')
+    
+    if title is None:
+        title = (f"Radiation Distribution Outside Wall\n"
+                f"{results['energy']} MeV Gamma, Channel Diameter: {results['channel_diameter']} cm")
+    ax.set_title(title, fontsize=16, fontweight='bold', pad=10)
+    
+    # Add improved legend with better positioning
+    handles, labels = ax.get_legend_handles_labels()
+    by_label = dict(zip(labels, handles))
+    legend = ax.legend(by_label.values(), by_label.keys(), 
+                      loc='upper right', framealpha=0.9, fontsize=11)
+    legend.get_frame().set_edgecolor('black')
+    
+    # Add enhanced grid with better styling
+    ax.grid(True, linestyle='--', alpha=0.3, color='gray')
+    ax.set_axisbelow(True)
+    
+    # Add detailed information box
+    info_text = (f"Source: {results['energy']} MeV Gamma\n"
+                f"Wall: {wall_thickness/ft_to_cm:.1f} ft concrete\n"
+                f"Channel: {results['channel_diameter']} cm ∅\n"
+                f"Detector: {results['detector_distance']} cm from wall\n"
+                f"Angle: {results['detector_angle']}°\n"
+                f"Dose Rate: {results['dose_rem_per_hr']:.2e} rem/hr")
+    
+    props = dict(boxstyle='round,pad=0.5', facecolor='white', alpha=0.9, edgecolor='black')
+    ax.text(0.02, 0.98, info_text, transform=ax.transAxes, fontsize=11,
+           verticalalignment='top', bbox=props)
+    
+    # Highlight the region of 10% or greater of the maximum dose
+    if not np.isnan(np.max(smoothed_data)):
+        high_dose_level = np.max(smoothed_data) * 0.1
+        high_dose_contour = ax.contour(X, Y, smoothed_data, 
+                                    levels=[high_dose_level],
+                                    colors=['red'],
+                                    linewidths=2)
+        
+        # Add label for high dose region
+        plt.clabel(high_dose_contour, inline=True, fontsize=9,
+                  fmt=lambda x: "10% of Max Dose")
+    
+    # Ensure proper aspect ratio
+    ax.set_aspect('equal')
+    
+    # Save high-resolution figure
+    plt.savefig(f"results/outside_wall_E{results['energy']}_D{results['channel_diameter']}_" +
+               f"dist{results['detector_distance']}_ang{results['detector_angle']}.png", 
+               dpi=300, bbox_inches='tight')
+    
+    return fig
 
-    # Create dose heatmaps for different energies and channel diameters
-    from config import SOURCE_ENERGIES, CHANNEL_DIAMETERS
 
-    for energy in SOURCE_ENERGIES:
-        for channel_diameter in CHANNEL_DIAMETERS:
-            try:
-                create_2d_dose_heatmap(results, energy, channel_diameter)
-                print(f"Created dose heatmap for E={energy} MeV, D={channel_diameter} cm")
-            except Exception as e:
-                print(f"Error creating heatmap for E={energy}, D={channel_diameter}: {str(e)}")
+
 
 
 #############################################OLD#########################################################
@@ -2427,42 +2613,18 @@ def visualize_flux_energy_distribution(results, energy, channel_diameter, distan
 # Add any additional visualization functions as needed
 
 if __name__ == "__main__":
-    # Test visualizations with sample data
-    import json
+    # Load results
+    results_file = os.path.join(DATA_DIR, 'simulation_results.json')
+    with open(results_file, 'r') as f:
+        results = json.load(f)
 
-    # Load test results if available
-    try:
-        with open('test_results.json', 'r') as f:
-            test_results = json.load(f)
+    # Create dose heatmaps for different energies and channel diameters
+    from config import SOURCE_ENERGIES, CHANNEL_DIAMETERS
 
-        # Create test visualizations
-        create_radiation_outside_wall_heatmap(test_results, 1.0, 5.0, 30, 0)
-        plot_dose_comparison(test_results, 5.0, 30)
-        create_interactive_dashboard(test_results)
-
-    except FileNotFoundError:
-        print("No test results found. Creating sample visualization with synthetic data.")
-
-        # Create synthetic data for testing
-        test_results = {
-            "Energy_1.0MeV": {
-                "CD5.0": {
-                    "D30_A0": {
-                        "dose": {"mean": 1.2e-3, "rel_error": 0.05},
-                        "heating": {"mean": 2.3e-4, "rel_error": 0.06},
-                        "kerma": {"mean": 2.5e-4, "rel_error": 0.07}
-                    },
-                    "D50_A0": {
-                        "dose": {"mean": 5.1e-4, "rel_error": 0.08},
-                        "heating": {"mean": 1.1e-4, "rel_error": 0.09},
-                        "kerma": {"mean": 1.2e-4, "rel_error": 0.10}
-                    }
-                }
-            }
-        }
-
-        # Create test visualization
-        create_radiation_outside_wall_heatmap(test_results, 1.0, 5.0, 30, 0)
-        print("Created sample visualization with synthetic data.")
-
-
+    for energy in SOURCE_ENERGIES:
+        for channel_diameter in CHANNEL_DIAMETERS:
+            try:
+                create_2d_dose_heatmap(results, energy, channel_diameter)
+                print(f"Created dose heatmap for E={energy} MeV, D={channel_diameter} cm")
+            except Exception as e:
+                print(f"Error creating heatmap for E={energy}, D={channel_diameter}: {str(e)}")
